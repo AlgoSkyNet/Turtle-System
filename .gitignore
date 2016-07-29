@@ -1,0 +1,751 @@
+
+
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Text;
+using System.Drawing;
+using PTLRuntime.NETScript;
+
+
+namespace ClassicTurtleTrader
+{
+	/// <summary>
+	/// ClassicTurtleTrader
+	/// 
+	/// </summary>
+	public class ClassicTurtleTrader : NETStrategy
+	{
+		public ClassicTurtleTrader()
+			: base()
+		{
+			#region Initialization
+			base.Author = "";
+			base.Comments = "";
+			base.Company = "";
+			base.Copyrights = "";
+			base.DateOfCreation = "11.01.2016";
+			base.ExpirationDate = 0;
+			base.Version = "";
+			base.Password = "66b4a6416f59370e942d353f08a9ae36";
+			base.ProjectName = "ClassicTurtleTrader";
+			#endregion
+		}
+        
+		[InputParameter("Magic Number", 0)]
+		public int magicNumber = 2010;
+        
+		[InputParameter("Start Trading Time", 1)]
+		public int startTradingTime = 900;
+        
+		[InputParameter("Stop Trading Time", 2)]
+		public int stopTradingTime = 2000;
+        
+		[InputParameter("Orders Time To Live Candles", 3)]
+		public int ordersTimeToLiveCandles = 4;
+        
+		public enum TradingStyle
+		{
+			BreakoutTrading,
+			ReversalTrading
+		};
+        
+		[InputParameter("Trading Style", 4)]
+		public TradingStyle ts = TradingStyle.ReversalTrading;
+        
+		[InputParameter("Entry Channel Period", 5)]
+		public int entryChannelPeriod = 20;
+        
+		[InputParameter("Exit Channel Period", 6)]
+		public int exitChannelPeriod = 10;
+        
+		[InputParameter("Lots", 7)]
+		public double lots = 0.1;
+        
+		[InputParameter("Slippage", 8)]
+		public int slippage = 3;
+        
+		[InputParameter("Use Fixed Take Profit", 9)]
+		public bool useFixedTakeProfit = false;
+        
+		[InputParameter("Take Profit", 10)]
+		public int takeProfit = 500;
+        
+		[InputParameter("Use Fixed Stop Loss", 11)]
+		public bool useFixedStopLoss = false;
+        
+		[InputParameter("Stop Loss", 12)]
+		public int stopLoss = 800;
+        
+		[InputParameter("Use Close By Market", 13)]
+		public bool useCloseByMarket = true;
+        
+		[InputParameter("Othod1Points", 14)]
+		public int othod1Points = 7;
+        
+		[InputParameter("ATR Period", 15)]
+		public int ATRPeriod = 20;
+        
+		[InputParameter("Coef ATR", 16)]
+		public double coefATR = 2.0;
+        
+		[InputParameter("Max Stop Loss", 17)]
+		public int maxSL = 800;
+        
+		private enum Pos
+		{
+			Long,
+			Short,
+			Flat
+		};
+
+		/// <summary>
+		/// This function will be called after creating
+		/// </summary>
+		public override void Init()
+		{
+			orderLiveCandles = 0;
+			position = Pos.Flat;
+		}
+		
+		public override void NextBar()
+		{
+			orderLiveCandles++;			
+		}
+		
+		private Pos position;
+		private int orderLiveCandles;
+		private double virtualStopLoss;
+		
+		/// <summary>
+		/// Entry point. This function is called when new quote comes 
+		/// </summary>
+		public override void OnQuote()
+		{
+			if (CurrentData.Count < entryChannelPeriod + exitChannelPeriod)
+				return;
+					
+			Position[] AllPos = Positions.GetPositions();
+			Order[] AllOrd = Orders.GetOrders(false);
+			
+			int time, hours, minutes;
+			bool positionWithDefinedMagicNumber = false;
+			bool orderWithDefinedMagicNumber = false;
+			bool tradingTime = false;
+			
+			string positionId = "-1";
+			string orderId = "-1";
+			
+			if (AllPos != null) // ���� �� �������� �������?
+			{	
+				foreach (Position p in AllPos)
+				{
+					if (p.Instrument == Instruments.Current && p.MagicNumber == magicNumber)
+					{
+						positionWithDefinedMagicNumber = true;
+						positionId = p.Id;
+					}		
+				}
+			}
+   			
+			if (AllOrd != null)
+			{
+				foreach (Order ord in AllOrd)
+				{
+					if (ord.Instrument == Instruments.Current && ord.MagicNumber == magicNumber)
+					{
+						orderWithDefinedMagicNumber = true;
+						orderId = ord.Id;
+					}		
+				}
+			}
+			
+			DateTime now = DateTime.Now;
+			hours = now.Hour;
+			minutes = now.Minute;
+
+			time = hours * 100 + minutes;
+   
+			if (startTradingTime < stopTradingTime)
+			{
+				if (time >= startTradingTime && time <= stopTradingTime)
+				{
+					tradingTime = true;
+				}
+			}
+			else
+			{
+				if ((time >= startTradingTime) || (time <= stopTradingTime))
+				{
+					tradingTime = true;
+				}
+			}
+   
+			double entryChannelUpper = CurrentData.GetPrice(PriceType.High, CurrentData.Highest(PriceType.High, 1, entryChannelPeriod));
+			double entryChannelLower = CurrentData.GetPrice(PriceType.Low, CurrentData.Lowest(PriceType.Low, 1, entryChannelPeriod));
+			double exitChannelUpper = CurrentData.GetPrice(PriceType.High, CurrentData.Highest(PriceType.High, 1, exitChannelPeriod));
+			double exitChannelLower = CurrentData.GetPrice(PriceType.Low, CurrentData.Lowest(PriceType.Low, 1, exitChannelPeriod));   		
+         
+			double closePrice = CurrentData.GetPrice(PriceType.Close);
+			double high = CurrentData.GetPrice(PriceType.High, 1);
+			double low = CurrentData.GetPrice(PriceType.Low, 1);
+   
+			Position pos = Positions.GetPositionById(positionId);
+			
+			// ����� �� ������� ������� �� �����
+			// ��� ������ ������ ������ �������� ���.
+			
+			if (position == Pos.Long // ������ ������ �������...
+			      && (closePrice < exitChannelLower   // ��� Close �������� ����� ������ ���?
+			      || closePrice < virtualStopLoss))   // ��� Close ���� ������ ����?
+			{
+				position = Pos.Flat;                 // "��������" ��������� ������ ������
+      	
+				if (positionWithDefinedMagicNumber == true)
+				{
+					if (ts == TradingStyle.BreakoutTrading)//�������� � ������, ��������� ������� ������� �������...
+					{
+					            		
+						if (pos.Side == Operation.Buy)
+						{
+							CloseLong(positionId);
+						}
+					}
+					else//�������� ���������...
+					{
+						if (pos.Side == Operation.Sell)
+						{
+							CloseShort(positionId);
+						}
+					}
+				}
+			}
+         
+			// ����� �� �������� ������� �� �����
+			// ��� ��� ������ ������� ������ �������� ���
+			if (position == Pos.Short// ������ ������� �������...
+			     && (closePrice > exitChannelUpper// ��� Close �������� ������ ������ ���?
+			     || closePrice > virtualStopLoss))        // ��� Close �������� ������� ����?
+			{
+				position = Pos.Flat;                 // "��������" ��������� ������� ������
+				if (positionWithDefinedMagicNumber == true)
+				{
+					if (ts == TradingStyle.BreakoutTrading)//�������� � ������, ��������� ������� ������� �������...
+					{
+						if (pos.Side == Operation.Sell)
+						{
+							CloseShort(positionId);
+						}
+					}
+					else//�������� ���������...
+					{
+						if (pos.Side == Operation.Buy)
+						{
+							CloseLong(positionId);
+						}
+					}
+				}
+			}
+         
+			// ������ � ������ ������?
+			if (position == Pos.Flat// ��� ������� ������...
+			   && closePrice > entryChannelUpper && ND(high - entryChannelUpper) == 0) // ��� Close ������� ������ ������ ���?
+			{
+				position = Pos.Long;                 // "��������" ��������� ������ ������
+				// "����������" ���������� ����
+				virtualStopLoss = closePrice - coefATR * Indicators.iATR(CurrentData, ATRPeriod).GetValue();
+				//��������� ��� ��������...
+				if ((orderWithDefinedMagicNumber = false || positionWithDefinedMagicNumber == false) && tradingTime == true)
+				{
+					if (ts == TradingStyle.BreakoutTrading)//�������� � ������, ��������� ������� �������� �������...
+					{
+						EnterBreakoutLong();
+					}
+					else//�������� ���������...
+					{
+						EnterReversalShort(exitChannelLower);
+					}
+				}
+			}
+         
+			// ������ � ������� ������?
+			if (position == Pos.Flat// ��� ������� ������...
+			   && closePrice < entryChannelLower && ND(low - entryChannelLower) == 0)
+			{
+				position = Pos.Short;	// "��������" ��������� ������� ������
+				// "����������" ���������� ����
+				virtualStopLoss = closePrice + coefATR * Indicators.iATR(CurrentData, ATRPeriod).GetValue();
+      
+				if ((orderWithDefinedMagicNumber = false || positionWithDefinedMagicNumber == false) && tradingTime == true)
+				{
+					if (ts == TradingStyle.BreakoutTrading) // �������� � ������, ��������� ������� �������� �������...
+					{
+						EnterBreakoutShort();
+					}
+					else//�������� ���������...
+					{
+						EnterReversalLong(exitChannelUpper);
+					}
+				}
+			}
+			
+			if (orderWithDefinedMagicNumber == true)
+			{
+				Order ord = Orders.GetOrderById(orderId);
+			
+				//���� ��������� ���������� �����, ���������, �� ��� �� ��� ��������?
+				CheckToCancellationOrder(orderId);
+			}
+			
+			if (ts == TradingStyle.BreakoutTrading && useFixedStopLoss == false)
+			{
+				CheckStopLossModification(positionId, exitChannelUpper, exitChannelLower);
+			}
+			if (useFixedTakeProfit == false)
+			{
+				CheckTakeProfitModification(positionId, exitChannelUpper, exitChannelLower);
+			}
+		}
+        
+		/// <summary>
+		/// This function will be called before removing
+		/// </summary>
+		public override void Complete()
+		{
+			
+		}
+
+		private void CheckToCancellationOrder(string orderId)
+		{
+			var ord = Orders.GetOrderById(orderId);
+			
+			if (orderLiveCandles > ordersTimeToLiveCandles)
+			{
+				if (!ord.Cancel())
+				{
+					Print("����� �� �����. �����: ", GetLastError());
+				}
+			}
+		}
+
+		private void CloseLong(string positionId)
+		{
+			var pos = Positions.GetPositionById(positionId);
+			
+			if (!pos.Close())
+			{
+				Print("�������� ������� ���������� � �������: ", GetLastError());  
+			}
+		}
+
+		private void CloseShort(string positionId)
+		{
+			var pos = Positions.GetPositionById(positionId);
+			
+			if (!pos.Close())
+			{
+				Print("�������� ������� ���������� � �������: ", GetLastError());  
+			}
+		}
+
+		private void CheckTakeProfitModification(string positionId, double exitChannelUpper, double exitChannelLower)
+		{
+			double spread;
+   			
+			var pos = Positions.GetPositionById(positionId);
+			
+			spread = Ask - Bid;
+   
+			exitChannelUpper -= spread;
+			exitChannelLower += spread;
+   
+			if (pos.Side == Operation.Buy)
+			{
+				if (exitChannelUpper < pos.TakeProfitOrder.Price)
+				{
+					if (!pos.SetTakeProfit(ND(exitChannelUpper)))
+					{
+						Print("���������� TakeProfit ����� BUY ��������� � �������: ", GetLastError());            
+					}
+					return;  
+				}
+			}
+			if (pos.Side == Operation.Sell)
+			{
+				if (exitChannelLower > pos.TakeProfitOrder.Price)
+				{
+					if (!pos.SetTakeProfit(ND(exitChannelLower)))
+					{
+						Print("���������� TakeProfit ����� SELL ��������� � �������: ", GetLastError());            
+					}
+					return;
+				}
+			}      
+		}
+	
+	
+		private void CheckStopLossModification(string positionId, double exitChannelUpper, double exitChannelLower)
+		{
+   			var pos = Positions.GetPositionById(positionId);
+   
+   			double spread = Ask - Bid;
+   
+   			exitChannelUpper -= spread;
+   			exitChannelLower += spread;
+   			
+   			if (pos.Side == Operation.Buy)
+   			{
+       	 		if (exitChannelLower > pos.StopLossOrder.Price)
+       	 		{
+       	 			if (!pos.SetStopLoss(ND(exitChannelLower)))
+   	       			{
+   	          			Print("���������� StopLoss ����� BUY ��������� � �������: ", GetLastError());            
+   	       			}
+   	       			return;  
+   	    		}
+   	 		}
+   			if (pos.Side == Operation.Sell)
+  			{
+        		if (exitChannelUpper < pos.StopLossOrder.Price)
+        		{
+	        		if (!pos.SetStopLoss(ND(exitChannelUpper)))
+   	       			{
+  	          			Print("���������� StopLoss ����� SELL ��������� � �������: ", GetLastError());            
+   	       			}
+   
+   	    		}            
+   	 		}
+		}	
+
+		private void EnterBreakoutLong()
+		{
+			//�������� ������ ������...
+			string ord_id = "-1";
+   
+   			double signalCandlePrice, orderPrice, kATR, sl, tp, spread;
+   
+   			spread = Ask - Bid;
+   
+		   	if (useFixedStopLoss == true) // ���������� ������������ StopLoss...
+   			{
+      			sl = stopLoss * Point;    
+   			}
+   			else // �������� ATR
+   			{
+   				kATR = coefATR * Indicators.iATR(CurrentData, ATRPeriod).GetValue();
+      
+      			if (kATR >  maxSL * Point)
+      			{
+         			sl = maxSL;
+      			}
+      			else
+      			{
+         			sl = kATR;
+      			}    
+   			}   
+   
+   			signalCandlePrice = CurrentData.GetPrice(PriceType.High, 1);
+      
+   			orderPrice = signalCandlePrice + othod1Points * Point;
+         
+   			if (useFixedTakeProfit == true) // ���������� ������������ TakeProfit...
+   			{	
+      			tp = takeProfit * Point - spread;
+   			}
+   			else //�� ���������� TakeProfit
+   			{
+      			tp = 0;
+   			}                  
+         
+            var request = new NewOrderRequest();
+            request.Account = Accounts.Current;  
+            request.Amount = lots;
+            request.Instrument = Instruments.Current;
+            request.MarketRange = slippage;
+            request.Price = ND(orderPrice);
+            request.StopLossOffset = ND(sl);
+            request.TakeProfitOffset = ND(tp);
+            request.Side = Operation.Buy;
+            request.Type = OrdersType.Stop;
+			request.MagicNumber = magicNumber;
+			request.Comment = "Classic Turtle Trader";
+
+            ord_id = Orders.Send(request);
+  			
+   			if (ord_id != "-1")
+   			{
+      			orderLiveCandles = 1;
+   			}
+   			return;
+		}
+
+		private void EnterReversalLong(double exitChannel)
+		{
+   			//�������� ������ ������...
+   			string ord_id = "-1";
+   			double signalCandlePrice, orderPrice, kATR, sl, tp, spread;
+   
+   			spread = Ask - Bid;
+   
+   			if (useFixedStopLoss == true)// ���������� ������������ StopLoss...
+   			{
+      			sl = stopLoss * Point;    
+   			}
+   			else // �������� ATR
+   			{
+   				kATR = coefATR * Indicators.iATR(CurrentData, ATRPeriod).GetValue();
+      
+      			if (kATR > maxSL * Point)
+      			{
+         			sl = maxSL;
+      			}
+      			else
+      			{
+         			sl = kATR;
+      			}    
+   			}   
+   
+   			signalCandlePrice = CurrentData.GetPrice(PriceType.Low, 1);
+      
+   			if (Ask - signalCandlePrice > othod1Points * Point) // ������� �����...
+   			{
+      			orderPrice = signalCandlePrice + othod1Points * Point;
+         
+      			if (useFixedTakeProfit == true) // ���������� ������������ TakeProfit...
+      			{
+         			tp = takeProfit * Point - spread;
+      			}
+      			else //�� ���������� TakeProfit
+      			{
+         			tp = exitChannel - spread;
+      			}                  
+         
+      			var request = new NewOrderRequest();
+            	request.Account = Accounts.Current;  
+            	request.Amount = lots;
+            	request.Instrument = Instruments.Current;
+            	request.MarketRange = slippage;
+            	request.Price = ND(orderPrice);
+            	request.StopLossOffset = ND(sl);
+            	request.TakeProfitOffset = ND(tp);
+            	request.Side = Operation.Buy;
+            	request.Type = OrdersType.Limit;
+				request.MagicNumber = magicNumber;
+				request.Comment = "Classic Turtle Trader";
+
+            	ord_id = Orders.Send(request);
+  			
+	   			if (ord_id != "-1")
+   				{
+    	  			orderLiveCandles = 1;
+   				}
+   				return;
+   			}
+   			else //�������� ������ �� �����...
+   			{
+      			if (useFixedTakeProfit == true) // ���������� ������������ TakeProfit...
+      			{
+         			tp = signalCandlePrice + takeProfit * Point - spread;
+      			}
+      			else //�� ���������� TakeProfit
+      			{
+         			tp = exitChannel - spread;
+      			}                  
+         
+      			//ticket = OrderSend(Symbol(), OP_BUY, Lots, ND(Ask), Slippage, ND(Ask - sl), ND(tp), "FxTurtle", MagicNumber, 0, clrGreen);
+      			
+      			var request = new NewOrderRequest();
+            	request.Account = Accounts.Current;  
+            	request.Amount = lots;
+            	request.Instrument = Instruments.Current;
+            	request.MarketRange = slippage;
+				request.Price = Instruments.Current.LastQuote.Ask;
+            	request.StopLossOffset = ND(sl);
+            	request.TakeProfitOffset = ND(tp);
+            	request.Side = Operation.Buy;
+            	request.Type = OrdersType.Market;
+				request.MagicNumber = magicNumber;
+				request.Comment = "Classic Turtle Trader";
+
+            	ord_id = Orders.Send(request);
+   		}
+	}
+   
+	void EnterBreakoutShort()
+	{
+   		//�������� ������� ������...
+   		string ord_id = "-1";
+   		double signalCandlePrice, orderPrice, kATR, sl, tp, spread;
+   
+   		spread = Ask - Bid;
+   
+   		if (useFixedStopLoss == true) // ���������� ������������ StopLoss...
+   		{
+      		sl = stopLoss * Point;
+   		}
+   		else // �������� ATR
+   		{
+   			kATR = coefATR * Indicators.iATR(CurrentData, ATRPeriod).GetValue();
+      
+      		if (kATR >  maxSL * Point)
+      		{
+         		sl = maxSL;
+      		}
+      		else
+      		{
+         		sl = kATR;
+      		}    
+   		}   
+   
+   		signalCandlePrice = CurrentData.GetPrice(PriceType.Low, 1);
+   
+   		orderPrice = signalCandlePrice - othod1Points * Point;
+         
+   		if (useFixedTakeProfit == true) // ���������� ������������ TakeProfit...
+   		{
+      		tp = takeProfit * Point + spread;
+   		}
+   		else //�� ���������� TakeProfit
+   		{
+      		tp = 0;
+   		}                  
+         
+   		var request = new NewOrderRequest();
+        request.Account = Accounts.Current;  
+        request.Amount = lots;
+        request.Instrument = Instruments.Current;
+        request.MarketRange = slippage;
+        request.Price = ND(orderPrice);
+        request.StopLossOffset = ND(sl);
+        request.TakeProfitOffset = ND(tp);
+        request.Side = Operation.Sell;
+        request.Type = OrdersType.Stop;
+		request.MagicNumber = magicNumber;
+		request.Comment = "Classic Turtle Trader";
+
+        ord_id = Orders.Send(request);
+  			
+   		if (ord_id != "-1")
+   		{
+      		orderLiveCandles = 1;
+   		}
+   		return;
+	}
+
+	void EnterReversalShort(double exitChannel)
+	{
+   		//�������� ������� ������...
+   		string ord_id = "-1";
+   		double signalCandlePrice, orderPrice, kATR, sl, tp, stopLevel, spread;
+   
+   		spread = Ask - Bid;
+   
+   		if (useFixedStopLoss == true)// ���������� ������������ StopLoss...
+   		{
+      		sl = stopLoss * Point;    
+   		}
+   		else // �������� ATR
+   		{
+   			kATR = coefATR * Indicators.iATR(CurrentData, ATRPeriod).GetValue();
+      
+      		if (kATR >  maxSL * Point)
+      		{
+         		sl = maxSL;
+      		}
+      		else
+      		{
+         		sl = kATR;
+      		}    
+   		}   
+   
+   		signalCandlePrice = CurrentData.GetPrice(PriceType.High, 1);
+
+   		if (signalCandlePrice - Bid  > othod1Points * Point)// ������� �����...
+   		{
+      		orderPrice = signalCandlePrice - othod1Points * Point;
+         
+				stopLevel = 0; //MarketInfo(Symbol(), MODE_STOPLEVEL) * Point;
+         
+      		if (orderPrice - Bid < stopLevel)
+      		{
+         		orderPrice += stopLevel;
+      		}
+         
+      		if (useFixedTakeProfit == true) // ���������� ������������ TakeProfit...
+      		{
+         		tp = signalCandlePrice - takeProfit * Point + spread;
+      		}
+      		else
+      		{
+         		tp = exitChannel + spread;
+      		}                  
+         
+      		var request = new NewOrderRequest();
+            request.Account = Accounts.Current;  
+            request.Amount = lots;
+            request.Instrument = Instruments.Current;
+            request.MarketRange = slippage;
+            request.Price = ND(orderPrice);
+            request.StopLossOffset = ND(sl);
+            request.TakeProfitOffset = ND(tp);
+            request.Side = Operation.Sell;
+            request.Type = OrdersType.Limit;
+			request.MagicNumber = magicNumber;
+			request.Comment = "Classic Turtle Trader";
+
+            ord_id = Orders.Send(request);
+  			
+            if (ord_id != "-1")
+			{
+      			orderLiveCandles = 1;
+   			}
+   			return;
+    	}
+   		else //�������� ������ �� �����...
+   		{
+      		if (useFixedTakeProfit == true) // ���������� ������������ TakeProfit...
+      		{
+         		tp = signalCandlePrice - takeProfit * Point + spread;
+      		}		
+      		else //�� ���������� TakeProfit
+      		{
+         		tp = exitChannel + spread;
+      		}                  
+         
+			var request = new NewOrderRequest();
+            request.Account = Accounts.Current;  
+            request.Amount = lots;
+            request.Instrument = Instruments.Current;
+            request.MarketRange = slippage;
+			request.Price = Instruments.Current.LastQuote.Bid;
+            request.StopLossOffset = ND(sl);
+            request.TakeProfitOffset = ND(tp);
+            request.Side = Operation.Buy;
+            request.Type = OrdersType.Market;
+			request.MagicNumber = magicNumber;
+			request.Comment = "Classic Turtle Trader";
+
+            ord_id = Orders.Send(request);
+            return;
+   		}   
+	}
+
+
+
+		double ND(double x)
+		{
+			var inst = Instruments.Current;
+			return Math.Round(x, inst.Precision, MidpointRounding.AwayFromZero);
+		}
+
+		void EM(int ticket)
+		{
+   			int lastError = GetLastError();
+   			if (ticket < 0 && lastError > 0)
+   			{
+      			Print("������� ������� ��������� � ������� # ", lastError);
+   			}
+	 	}
+    }
+}
+
